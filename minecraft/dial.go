@@ -109,6 +109,11 @@ type Dialer struct {
 	// (pre-1.21.90) when connecting to the server. This should only be used for outdated
 	// servers, as enabling it will cause compatibility issues with updated servers.
 	EnableLegacyAuth bool
+
+	// BaseGameVersion is a map of server addresses to game versions to use when connecting to those servers.
+	// The keys are regex patterns that match against server addresses, and the values are the game versions
+	// to use when connecting to a server that matches the pattern.
+	BaseGameVersion map[string]string
 }
 
 // Dial dials a Minecraft connection to the address passed over the network passed. The network is typically
@@ -229,6 +234,7 @@ func (d Dialer) DialContext(ctx context.Context, network, address string) (conn 
 	conn.disconnectOnInvalidPacket = d.DisconnectOnInvalidPackets
 	conn.disconnectOnUnknownPacket = d.DisconnectOnUnknownPackets
 	conn.maxDecompressedLen = math.MaxInt
+	conn.serverVersionOverrides = d.BaseGameVersion
 
 	defaultIdentityData(&conn.identityData)
 	defaultClientData(address, conn.identityData.DisplayName, &conn.clientData)
