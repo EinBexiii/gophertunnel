@@ -71,12 +71,17 @@ func ReadURL(url string) (*Pack, error) {
 }
 
 // FromURL creates a Pack from a URL without downloading the full content. It sets the downloadURL so that
-// the client can download the pack directly from the URL. The manifest and size must be provided since the
-// pack content is not downloaded. Use WithChecksum to set the checksum if needed. This is useful when you
-// want clients to download the resource pack via HTTP instead of RakNet.
-func FromURL(url string, manifest Manifest, size uint64) *Pack {
+// the client can download the pack directly from the URL. Only the essential fields (UUID, version, size)
+// are required since the client will download the pack directly. This is useful when you want clients to
+// download the resource pack via HTTP instead of RakNet.
+func FromURL(url string, id uuid.UUID, version [3]int, size uint64) *Pack {
 	return &Pack{
-		manifest:    &manifest,
+		manifest: &Manifest{
+			Header: Header{
+				UUID:    id,
+				Version: version,
+			},
+		},
 		downloadURL: url,
 		content:     bytes.NewReader(nil),
 		size:        size,
