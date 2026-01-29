@@ -29,6 +29,9 @@ type Pack struct {
 	// content is a bytes.Reader that contains the full content of the zip file. It is used to send the full
 	// data to a client.
 	content *bytes.Reader
+	// size is the size of the resource pack in bytes. This is used when the pack is created from a URL
+	// without downloading the content, allowing Len() to return the correct size.
+	size uint64
 	// contentKey is the key used to encrypt the files. The client uses this to decrypt the resource pack if encrypted.
 	// If nothing is encrypted, this field can be left as an empty string.
 	contentKey string
@@ -65,6 +68,19 @@ func ReadURL(url string) (*Pack, error) {
 	}
 	pack.downloadURL = url
 	return pack, nil
+}
+
+// FromURL creates a Pack from a URL without downloading the full content. It sets the downloadURL so that
+// the client can download the pack directly from the URL. The manifest and size must be provided since the
+// pack content is not downloaded. Use WithChecksum to set the checksum if needed. This is useful when you
+// want clients to download the resource pack via HTTP instead of RakNet.
+func FromURL(url string, manifest Manifest, size uint64) *Pack {
+	return &Pack{
+		manifest:    &manifest,
+		downloadURL: url,
+		content:     bytes.NewReader(nil),
+		size:        size,
+	}
 }
 
 // MustReadPath compiles a resource pack found at the path passed. The resource pack must either be a zip
@@ -201,6 +217,9 @@ func (pack *Pack) Checksum() [32]byte {
 
 // Len returns the total length in bytes of the content of the archive that contained the resource pack.
 func (pack *Pack) Len() int {
+	if pack.size > 0 {
+		return int(pack.size)
+	}
 	return pack.content.Len()
 }
 
@@ -267,6 +286,13 @@ func (p *Pack) ReadFile(filePath string) ([]byte, error) {
 // new Pack is returned.
 func (pack Pack) WithContentKey(key string) *Pack {
 	pack.contentKey = key
+	return &pack
+}
+
+// WithChecksum creates a copy of the pack and sets the checksum to the checksum provided, after which the
+// new Pack is returned.
+func (pack Pack) WithChecksum(checksum [32]byte) *Pack {
+	pack.checksum = checksum
 	return &pack
 }
 
