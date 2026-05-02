@@ -240,9 +240,15 @@ func (d Dialer) DialContext(ctx context.Context, network, address string) (conn 
 		return nil, &net.OpError{Op: "dial", Net: "minecraft", Err: fmt.Errorf("dial: no network under id %v", network)}
 	}
 
-	var pong []byte
 	var netConn net.Conn
-	if pong, err = n.PingContext(ctx, address); err == nil && !d.IgnorePongPort {
+	if d.IgnorePongPort {
+		// Skip the pre-flight ping entirely. The vanilla Bedrock client
+		// connects directly to the address typed by the user; the extra
+		// PingContext call we'd otherwise do here uses a separate UDP
+		// socket (different 5-tuple) and can confuse anti-DDoS proxies
+		// like Cloudflare Spectrum into rate-limiting the real Dial.
+		netConn, err = n.DialContext(ctx, address)
+	} else if pong, perr := n.PingContext(ctx, address); perr == nil {
 		netConn, err = n.DialContext(ctx, addressWithPongPort(pong, address))
 	} else {
 		netConn, err = n.DialContext(ctx, address)
