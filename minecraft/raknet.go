@@ -5,16 +5,29 @@ import (
 	"github.com/sandertv/go-raknet"
 	"log/slog"
 	"net"
+	"time"
 )
 
 // RakNet is an implementation of a RakNet v10 Network.
 type RakNet struct {
 	l *slog.Logger
+	// MTUDiscoveryWarmup is forwarded to raknet.Dialer; see its documentation.
+	MTUDiscoveryWarmup time.Duration
+}
+
+// NewRakNet constructs a RakNet network with the given logger and MTU
+// discovery warmup duration. Use the returned value when registering a
+// custom network with RegisterNetwork.
+func NewRakNet(l *slog.Logger, mtuDiscoveryWarmup time.Duration) RakNet {
+	return RakNet{l: l, MTUDiscoveryWarmup: mtuDiscoveryWarmup}
 }
 
 // DialContext ...
 func (r RakNet) DialContext(ctx context.Context, address string) (net.Conn, error) {
-	return raknet.Dialer{ErrorLog: r.l.With("net origin", "raknet")}.DialContext(ctx, address)
+	return raknet.Dialer{
+		ErrorLog:           r.l.With("net origin", "raknet"),
+		MTUDiscoveryWarmup: r.MTUDiscoveryWarmup,
+	}.DialContext(ctx, address)
 }
 
 // PingContext ...

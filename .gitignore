@@ -1,4 +1,13 @@
 config.toml
+
+# Local debug artefacts
+/bot_logger
+/session.log
+/token.json
+/wasm-protocol/
+/protocol.wasm
+/gophertunnel
+
 # Created by .ignore support plugin (hsz.mobi)
 ### Go template
 # Binaries for programs and plugins

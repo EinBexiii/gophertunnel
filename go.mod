@@ -19,3 +19,5 @@ require (
 )
 
 require golang.org/x/image v0.21.0 // indirect
+
+replace github.com/sandertv/go-raknet => github.com/EinBexiii/go-raknet v0.0.0-20260502111831-5e7815691a70
