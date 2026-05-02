@@ -15,6 +15,8 @@ type RakNet struct {
 	MTUDiscoveryWarmup time.Duration
 	// MaxAttempts is forwarded to raknet.Dialer; see its documentation.
 	MaxAttempts int
+	// WarmupOnFirstAttempt is forwarded to raknet.Dialer; see its documentation.
+	WarmupOnFirstAttempt bool
 }
 
 // NewRakNet constructs a RakNet network with the given logger and MTU
@@ -36,9 +38,10 @@ func NewRakNetWith(l *slog.Logger, mtuDiscoveryWarmup time.Duration, maxAttempts
 // DialContext ...
 func (r RakNet) DialContext(ctx context.Context, address string) (net.Conn, error) {
 	return raknet.Dialer{
-		ErrorLog:           r.l.With("net origin", "raknet"),
-		MTUDiscoveryWarmup: r.MTUDiscoveryWarmup,
-		MaxAttempts:        r.MaxAttempts,
+		ErrorLog:             r.l.With("net origin", "raknet"),
+		MTUDiscoveryWarmup:   r.MTUDiscoveryWarmup,
+		MaxAttempts:          r.MaxAttempts,
+		WarmupOnFirstAttempt: r.WarmupOnFirstAttempt,
 	}.DialContext(ctx, address)
 }
 
