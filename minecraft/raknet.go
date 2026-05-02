@@ -35,6 +35,14 @@ func NewRakNetWith(l *slog.Logger, mtuDiscoveryWarmup time.Duration, maxAttempts
 	return RakNet{l: l, MTUDiscoveryWarmup: mtuDiscoveryWarmup, MaxAttempts: maxAttempts}
 }
 
+// WithLogger returns a copy of r with the logger set to l. This is intended
+// to be used inside a RegisterNetwork factory: build a RakNet with all the
+// fields set, then call .WithLogger(l) inside the factory.
+func (r RakNet) WithLogger(l *slog.Logger) RakNet {
+	r.l = l
+	return r
+}
+
 // DialContext ...
 func (r RakNet) DialContext(ctx context.Context, address string) (net.Conn, error) {
 	return raknet.Dialer{
