@@ -116,6 +116,14 @@ type Dialer struct {
 	// (pre-1.21.90) when connecting to the server. This should only be used for outdated
 	// servers, as enabling it will cause compatibility issues with updated servers.
 	EnableLegacyAuth bool
+
+	// IgnorePongPort, if set to true, makes Dial connect to the address as
+	// supplied by the caller, ignoring any redirect port advertised in the
+	// server's Pong (MOTD fragments 10/11). The vanilla Bedrock client does
+	// not follow this redirect either, so enabling this is required for
+	// servers whose Pong advertises a port that is not actually reachable
+	// (a common misconfiguration on Geyser/CF Spectrum setups).
+	IgnorePongPort bool
 }
 
 // Dial dials a Minecraft connection to the address passed over the network passed. The network is typically
@@ -234,7 +242,7 @@ func (d Dialer) DialContext(ctx context.Context, network, address string) (conn 
 
 	var pong []byte
 	var netConn net.Conn
-	if pong, err = n.PingContext(ctx, address); err == nil {
+	if pong, err = n.PingContext(ctx, address); err == nil && !d.IgnorePongPort {
 		netConn, err = n.DialContext(ctx, addressWithPongPort(pong, address))
 	} else {
 		netConn, err = n.DialContext(ctx, address)
