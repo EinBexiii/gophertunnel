@@ -9,7 +9,6 @@ import (
 	"math"
 	"math/big"
 	"math/bits"
-	"strings"
 	"unsafe"
 
 	"github.com/go-gl/mathgl/mgl32"
@@ -130,15 +129,6 @@ func (r *Reader) BlockPos(x *BlockPos) {
 	r.Varint32(&x[2])
 }
 
-// UBlockPos reads three varint32s, one unsigned for the y, into a BlockPos from the underlying buffer.
-func (r *Reader) UBlockPos(x *BlockPos) {
-	r.Varint32(&x[0])
-	var y uint32
-	r.Varuint32(&y)
-	x[1] = int32(y)
-	r.Varint32(&x[2])
-}
-
 // ChunkPos writes a ChunkPos as 2 varint32s to the underlying buffer.
 func (r *Reader) ChunkPos(x *ChunkPos) {
 	r.Varint32(&x[0])
@@ -155,7 +145,7 @@ func (r *Reader) SubChunkPos(x *SubChunkPos) {
 // SoundPos reads an mgl32.Vec3 that serves as a position for a sound.
 func (r *Reader) SoundPos(x *mgl32.Vec3) {
 	var b BlockPos
-	r.UBlockPos(&b)
+	r.BlockPos(&b)
 	*x = mgl32.Vec3{float32(b[0]) / 8, float32(b[1]) / 8, float32(b[2]) / 8}
 }
 
@@ -280,7 +270,7 @@ func (r *Reader) PlayerInventoryAction(x *UseItemTransactionData) {
 	Slice(r, &x.Actions)
 	r.Varuint32(&x.ActionType)
 	r.Varuint32(&x.TriggerType)
-	r.UBlockPos(&x.BlockPosition)
+	r.BlockPos(&x.BlockPosition)
 	r.Varint32(&x.BlockFace)
 	r.Varint32(&x.HotBarSlot)
 	r.ItemInstance(&x.HeldItem)
@@ -288,6 +278,7 @@ func (r *Reader) PlayerInventoryAction(x *UseItemTransactionData) {
 	r.Vec3(&x.ClickedPosition)
 	r.Varuint32(&x.BlockRuntimeID)
 	r.Varuint32(&x.ClientPrediction)
+	r.Uint8(&x.ClientCooldownState)
 }
 
 // GameRule reads a GameRule x from the Reader.
@@ -341,8 +332,8 @@ func (r *Reader) GameRuleLegacy(x *GameRule) {
 }
 
 // EntityMetadata reads an entity metadata map from the underlying buffer into map x.
-func (r *Reader) EntityMetadata(x *map[uint32]any) {
-	*x = map[uint32]any{}
+func (r *Reader) EntityMetadata(x *EntityMetadata) {
+	*x = EntityMetadata{}
 
 	var count uint32
 	r.Varuint32(&count)
@@ -476,6 +467,70 @@ func (r *Reader) ItemInstance(i *ItemInstance) {
 	FuncSliceUint32Length(bufReader, &x.CanBreak, bufReader.StringUTF)
 
 	if x.NetworkID == bufReader.shieldID {
+		bufReader.Int64(&x.BlockingTick)
+	}
+}
+
+// ItemInstanceNew reads an ItemInstance i from the underlying buffer in the new format.
+func (r *Reader) ItemInstanceNew(i *ItemInstance) {
+	x := &i.Stack
+	var id int16
+	r.Int16(&id)
+	x.NetworkID = int32(id)
+
+	r.Uint16(&x.Count)
+	r.Varuint32(&x.MetadataValue)
+
+	var hasNetID bool
+	r.Bool(&hasNetID)
+
+	if hasNetID {
+		var empty uint32
+		r.Varuint32(&empty)
+		r.Varint32(&i.StackNetworkID)
+	} else {
+		i.StackNetworkID = 0
+	}
+
+	var runtimeID uint32
+	r.Varuint32(&runtimeID)
+	x.BlockRuntimeID = int32(runtimeID)
+
+	var extraData []byte
+	r.ByteSlice(&extraData)
+
+	if len(extraData) == 0 {
+		return
+	}
+
+	buf := bytes.NewBuffer(extraData)
+	bufReader := NewReader(buf, r.shieldID, r.limitsEnabled)
+
+	var length int16
+	bufReader.Int16(&length)
+
+	if length == 0 {
+		x.NBTData = nil
+		return
+	} else if length == -1 {
+		var version uint8
+		bufReader.Uint8(&version)
+
+		switch version {
+		case 1:
+			bufReader.NBT(&x.NBTData, nbt.LittleEndian)
+		default:
+			bufReader.UnknownEnumOption(version, "item user data version")
+			return
+		}
+	} else {
+		bufReader.NBT(&x.NBTData, nbt.LittleEndian)
+	}
+
+	FuncSliceUint32Length(bufReader, &x.CanBePlacedOn, bufReader.StringUTF)
+	FuncSliceUint32Length(bufReader, &x.CanBreak, bufReader.StringUTF)
+
+	if x.NetworkID == bufReader.shieldID {
 		var blockingTick int64
 		bufReader.Int64(&blockingTick)
 	}
@@ -526,8 +581,7 @@ func (r *Reader) Item(x *ItemStack) {
 	FuncSliceUint32Length(bufReader, &x.CanBreak, bufReader.StringUTF)
 
 	if x.NetworkID == bufReader.shieldID {
-		var blockingTick int64
-		bufReader.Int64(&blockingTick)
+		bufReader.Int64(&x.BlockingTick)
 	}
 }
 
@@ -658,24 +712,6 @@ func (r *Reader) ShapeData(x *ShapeData) {
 		return
 	}
 	(*x).Marshal(r)
-}
-
-// StringConst reads a string from the reader and matches its length against x.
-func (r *Reader) StringConst(x string) {
-	var length uint32
-	r.Varuint32(&length)
-	l := int(length)
-	if l != len(x) {
-		r.panicf("expected string with a length of %v, got %v", len(x), l)
-	}
-	data := make([]byte, l)
-	if _, err := r.r.Read(data); err != nil {
-		r.panic(err)
-	}
-	input := *(*string)(unsafe.Pointer(&data))
-	if !strings.EqualFold(input, x) {
-		r.panicf("expected string to be %q, got %q", x, input)
-	}
 }
 
 // SliceLimit checks if the value passed is lower than the limit passed. If

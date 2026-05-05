@@ -90,6 +90,7 @@ type Conn struct {
 	enc                  *packet.Encoder
 	dec                  *packet.Decoder
 	compression          packet.Compression
+	compressionSelector  func(proto Protocol) packet.Compression
 	compressionThreshold int
 	maxDecompressedLen   int
 	readerLimits         bool
@@ -125,11 +126,16 @@ type Conn struct {
 	deferredPackets []*packetData
 	readDeadline    <-chan time.Time
 
+	// sendMu protects bufferedSend/bufferedSendSpare.
 	sendMu sync.Mutex
+	// encMu serializes encoder state changes and network writes (enc.Encode).
+	// Lock order (when both are needed): encMu → sendMu.
+	encMu sync.Mutex
 	// bufferedSend is a slice of byte slices containing packets that are 'written'. They are buffered until
 	// they are sent each 20th of a second.
-	bufferedSend [][]byte
-	hdr          *packet.Header
+	bufferedSend      [][]byte
+	bufferedSendSpare [][]byte
+	hdr               *packet.Header
 
 	// readyToLogin is a bool indicating if the connection is ready to login. This is used to ensure that the client
 	// has received the relevant network settings before the login sequence starts.
@@ -366,11 +372,12 @@ func (conn *Conn) WritePacket(pk packet.Packet) error {
 		internal.BufferPool.Put(buf)
 	}()
 
-	conn.hdr.PacketID = pk.ID()
-	_ = conn.hdr.Write(buf)
-	l := buf.Len()
-
 	for _, converted := range conn.proto.ConvertFromLatest(pk, conn) {
+		buf.Reset()
+		conn.hdr.PacketID = converted.ID()
+		_ = conn.hdr.Write(buf)
+		l := buf.Len()
+
 		converted.Marshal(conn.proto.NewWriter(buf, conn.shieldID.Load()))
 
 		if conn.packetFunc != nil {
@@ -491,23 +498,37 @@ func (conn *Conn) Flush() error {
 		return conn.closeErr("flush")
 	default:
 	}
-	conn.sendMu.Lock()
-	defer conn.sendMu.Unlock()
 
-	if len(conn.bufferedSend) > 0 {
-		if err := conn.enc.Encode(conn.bufferedSend); err != nil && !errors.Is(err, net.ErrClosed) {
-			// Should never happen.
-			panic(fmt.Errorf("error encoding packet batch: %w", err))
-		}
-		// First manually clear out conn.bufferedSend so that re-using the slice after resetting its length to
-		// 0 doesn't result in an 'invisible' memory leak.
-		for i := range conn.bufferedSend {
-			conn.bufferedSend[i] = nil
-		}
-		// Slice the conn.bufferedSend to a length of 0 so we don't have to re-allocate space in this slice
-		// every time.
-		conn.bufferedSend = conn.bufferedSend[:0]
+	conn.encMu.Lock()
+	defer conn.encMu.Unlock()
+
+	conn.sendMu.Lock()
+	if len(conn.bufferedSend) == 0 {
+		conn.sendMu.Unlock()
+		return nil
 	}
+
+	// Detach the current buffer and swap in the spare so writers can keep appending while we encode,
+	// without reallocating bufferedSend.
+	toSend := conn.bufferedSend
+	conn.bufferedSend = conn.bufferedSendSpare[:0]
+	conn.bufferedSendSpare = nil
+	conn.sendMu.Unlock()
+
+	if err := conn.enc.Encode(toSend); err != nil && !errors.Is(err, net.ErrClosed) {
+		// Should never happen.
+		panic(fmt.Errorf("error encoding packet batch: %w", err))
+	}
+
+	// Clear out toSend so that re-using the slice after resetting its length to 0 doesn't keep references
+	// to packet payloads alive, causing an 'invisible' memory leak.
+	for i := range toSend {
+		toSend[i] = nil
+	}
+
+	conn.sendMu.Lock()
+	conn.bufferedSendSpare = toSend[:0]
+	conn.sendMu.Unlock()
 	return nil
 }
 
@@ -718,6 +739,8 @@ func (conn *Conn) handlePacket(pk packet.Packet) error {
 		return conn.handleItemRegistry(pk)
 	case *packet.ChunkRadiusUpdated:
 		return conn.handleChunkRadiusUpdated(pk)
+	case *packet.DimensionData:
+		return conn.handleDimensionData(pk)
 	}
 	return nil
 }
@@ -744,6 +767,12 @@ func (conn *Conn) handleRequestNetworkSettings(pk *packet.RequestNetworkSettings
 		return fmt.Errorf("incompatible protocol version: expected %v, got %v", protocol.CurrentProtocol, pk.ClientProtocol)
 	}
 
+	if conn.compressionSelector != nil {
+		if c := conn.compressionSelector(conn.proto); c != nil {
+			conn.compression = c
+		}
+	}
+
 	conn.expect(packet.IDLogin)
 	if err := conn.WritePacket(&packet.NetworkSettings{
 		CompressionThreshold: uint16(conn.compressionThreshold),
@@ -752,7 +781,9 @@ func (conn *Conn) handleRequestNetworkSettings(pk *packet.RequestNetworkSettings
 		return fmt.Errorf("send NetworkSettings: %w", err)
 	}
 	_ = conn.Flush()
+	conn.encMu.Lock()
 	conn.enc.EnableCompression(conn.compression, conn.compressionThreshold)
+	conn.encMu.Unlock()
 	conn.dec.EnableCompression(conn.compression, conn.maxDecompressedLen)
 	return nil
 }
@@ -763,7 +794,9 @@ func (conn *Conn) handleNetworkSettings(pk *packet.NetworkSettings) error {
 	if !ok {
 		return fmt.Errorf("unknown compression algorithm %v", pk.CompressionAlgorithm)
 	}
+	conn.encMu.Lock()
 	conn.enc.EnableCompression(alg, int(pk.CompressionThreshold))
+	conn.encMu.Unlock()
 	conn.dec.EnableCompression(alg, conn.maxDecompressedLen)
 	conn.readyToLogin = true
 	return nil
@@ -865,7 +898,9 @@ func (conn *Conn) handleServerToClientHandshake(pk *packet.ServerToClientHandsha
 	keyBytes := sha256.Sum256(append(salt, sharedSecret...))
 
 	// Finally we enable encryption for the enc and dec using the secret pubKey bytes we produced.
+	conn.encMu.Lock()
 	conn.enc.EnableEncryption(keyBytes)
+	conn.encMu.Unlock()
 	conn.dec.EnableEncryption(keyBytes)
 
 	// We write a ClientToServerHandshake packet (which has no payload) as a response.
@@ -942,7 +977,7 @@ func (conn *Conn) handleResourcePackStack(pk *packet.ResourcePackStack) error {
 			return fmt.Errorf("texture pack (UUID=%v, version=%v) not downloaded", pack.UUID, pack.Version)
 		}
 	}
-	conn.expect(packet.IDStartGame)
+	conn.expect(packet.IDDimensionData, packet.IDStartGame)
 	_ = conn.WritePacket(&packet.ResourcePackClientResponse{Response: packet.PackResponseCompleted})
 	return nil
 }
@@ -1021,6 +1056,18 @@ func (conn *Conn) handleResourcePackClientResponse(pk *packet.ResourcePackClient
 // startGame sends a StartGame packet using the game data of the connection.
 func (conn *Conn) startGame() {
 	data := conn.gameData
+	if len(data.Dimensions) > 0 {
+		_ = conn.WritePacket(&packet.DimensionData{Definitions: data.Dimensions})
+	}
+	_ = conn.WritePacket(&packet.JigsawStructureData{
+		StructureData: map[string]any{
+			"processors":     make([]map[string]any, 0),
+			"template_pools": make([]map[string]any, 0),
+			"jigsaws":        make([]map[string]any, 0),
+			"structure_sets": make([]map[string]any, 0),
+		},
+	})
+	_ = conn.WritePacket(&packet.VoxelShapes{})
 	_ = conn.WritePacket(&packet.StartGame{
 		Difficulty:                   data.Difficulty,
 		EntityUniqueID:               data.EntityUniqueID,
@@ -1052,6 +1099,7 @@ func (conn *Conn) startGame() {
 		PlayerMovementSettings:       data.PlayerMovementSettings,
 		WorldGameMode:                data.WorldGameMode,
 		Hardcore:                     data.Hardcore,
+		XBLBroadcastMode:             data.XBLBroadcastMode,
 		ServerAuthoritativeInventory: data.ServerAuthoritativeInventory,
 		PlayerPermissions:            data.PlayerPermissions,
 		Experiments:                  data.Experiments,
@@ -1218,6 +1266,11 @@ func (conn *Conn) handleResourcePackChunkRequest(pk *packet.ResourcePackChunkReq
 	return nil
 }
 
+func (conn *Conn) handleDimensionData(pk *packet.DimensionData) error {
+	conn.gameData.Dimensions = pk.Definitions
+	return nil
+}
+
 // handleStartGame handles an incoming StartGame packet. It is the signal that the player has been added to a
 // world, and it obtains most of its dedicated properties.
 func (conn *Conn) handleStartGame(pk *packet.StartGame) error {
@@ -1247,6 +1300,7 @@ func (conn *Conn) handleStartGame(pk *packet.StartGame) error {
 		PlayerMovementSettings:       pk.PlayerMovementSettings,
 		WorldGameMode:                pk.WorldGameMode,
 		Hardcore:                     pk.Hardcore,
+		XBLBroadcastMode:             pk.XBLBroadcastMode,
 		ServerAuthoritativeInventory: pk.ServerAuthoritativeInventory,
 		PlayerPermissions:            pk.PlayerPermissions,
 		ChatRestrictionLevel:         pk.ChatRestrictionLevel,
@@ -1255,6 +1309,7 @@ func (conn *Conn) handleStartGame(pk *packet.StartGame) error {
 		Experiments:                  pk.Experiments,
 		UseBlockNetworkIDHashes:      pk.UseBlockNetworkIDHashes,
 		PropertyData:                 pk.PropertyData,
+		Dimensions:                   conn.gameData.Dimensions,
 	}
 	conn.expect(packet.IDItemRegistry)
 	return nil
@@ -1410,7 +1465,9 @@ func (conn *Conn) enableEncryption(clientPublicKey *ecdsa.PublicKey) error {
 	keyBytes := sha256.Sum256(append(conn.salt, sharedSecret...))
 
 	// Finally we enable encryption for the encoder and decoder using the secret key bytes we produced.
+	conn.encMu.Lock()
 	conn.enc.EnableEncryption(keyBytes)
+	conn.encMu.Unlock()
 	conn.dec.EnableEncryption(keyBytes)
 
 	return nil

@@ -265,7 +265,7 @@ func (d Dialer) DialContext(ctx context.Context, network, address string) (conn 
 		if !d.KeepXBLIdentityData {
 			clearXBLIdentityData(&conn.identityData)
 		}
-		request = login.EncodeOffline(conn.identityData, conn.clientData, key, token, d.EnableLegacyAuth)
+		request = login.EncodeOffline(conn.identityData, conn.clientData, key, d.EnableLegacyAuth)
 	} else {
 		// We login as an Android device and this will show up in the 'titleId' field in the JWT chain, which
 		// we can't edit. We just enforce Android data for logging in.
@@ -441,7 +441,7 @@ func defaultClientData(address, username string, d *login.ClientData) {
 		d.ClientRandomID = rand.Int63()
 	}
 	if d.DeviceID == "" {
-		d.DeviceID = uuid.New().String()
+		d.DeviceID = d.ExpectedDeviceIDFormat().Generate()
 	}
 	if d.LanguageCode == "" {
 		d.LanguageCode = "en_GB"
@@ -451,6 +451,7 @@ func defaultClientData(address, username string, d *login.ClientData) {
 		_, _ = cryptorand.Read(id)
 		d.PlayFabID = hex.EncodeToString(id)
 	}
+
 	if d.AnimatedImageData == nil {
 		d.AnimatedImageData = make([]login.SkinAnimation, 0)
 	}

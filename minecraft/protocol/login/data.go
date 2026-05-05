@@ -1,7 +1,9 @@
 package login
 
 import (
+	cryptorand "crypto/rand"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"net"
@@ -129,7 +131,9 @@ type ClientData struct {
 	DeviceOS protocol.DeviceOS
 	// DeviceID is usually a UUID specific to the device. A different user will have the same UUID for this.
 	// DeviceID is not guaranteed to always be a UUID. It is a base64 encoded string under some circumstances.
-	DeviceID string `json:"DeviceId"`
+	// This field is not automatically verified by default, because the format is different for each OS and
+	// not all have been verified.
+	DeviceID DeviceID `json:"DeviceId"`
 	// GameVersion is the game version of the player that attempted to join, for example '1.11.0'.
 	GameVersion string
 	// GUIScale is the GUI scale of the player. It is by default 0, and is otherwise -1 or -2 for a smaller
@@ -224,20 +228,23 @@ type ClientData struct {
 	CompatibleWithClientSideChunkGen bool
 	// MaxViewDistance is the highest render distance that the client's hardware can handle.
 	MaxViewDistance int
-	// MemoryTier is the tier of memory that the client's hardware has. This is a number between 0 and 5. The
+	// MemoryTier is the tier of memory that the client's hardware has. This is a number between 0 and 4. The
 	// full calculation of this tier is currently unknown but the following is a rough estimate from a
 	// developer at Mojang:
-	// 0 - Undetermined
-	// 1 - Super Low, less than ~1.5GB of memory
-	// 2 - Low, less than ~2GB of memory
-	// 3 - Mid, less than ~4GB of memory
-	// 4 - High, less than ~8GB of memory
-	// 5 - Super High, more than ~8GB of memory
+	// 0 - Super Low, less than ~1.5GB of memory
+	// 1 - Low, less than ~2GB of memory
+	// 2 - Mid, less than ~4GB of memory
+	// 3 - High, less than ~8GB of memory
+	// 4 - Super High, more than ~8GB of memory
 	MemoryTier int
 	// PlatformType is the type of platform the client is running.
 	PlatformType int
 	// GraphicsMode is the graphics mode the client is running.
 	GraphicsMode int
+	// PartyID is the identifier of the client's party, or empty if they are not in a party.
+	PartyID string `json:"PartyId"`
+	// PartyLeader is if the client is the leader of the party they are in.
+	PartyLeader bool `json:"IsPartyLeader"`
 }
 
 // PersonaPiece represents a piece of a persona skin. All pieces are sent separately.
@@ -399,4 +406,87 @@ func base64DecLength(base64Data string, validLengths ...int) error {
 		}
 	}
 	return fmt.Errorf("invalid size: got %v, expected one of %v", actualLength, validLengths)
+}
+
+type DeviceID string
+
+// DeviceIDFormat describes the format of a DeviceID.
+type DeviceIDFormat uint8
+
+const (
+	DeviceIDFormatUpperHexString DeviceIDFormat = iota // "ADA3DFA4622F4E2FB2C14A496D52DB96" (iOS)
+	DeviceIDFormatLowerHexString                       // "a4f365bb1e04459bbe4cb3cbf9d546e0" (Android, Win32)
+	DeviceIDFormatBase64                               // "VlhnpI7TuWyfHiUx3WYwFvQQHbDkv505h6VVo40Cngw=" (XBOX)
+	DeviceIDFormatUUID                                 // "05601fd2-9c71-30b1-b174-5fa11b9de09f" (Orbis)
+	DeviceIDFormatInvalid
+)
+
+// lowerMatch checks that a string contains only lower-case hex characters and digits.
+var lowerMatch = regexp.MustCompile(`^[a-z0-9]+$`)
+
+// Format determines the DeviceIDFormat of the DeviceID. If no format is
+// determined, DeviceIDFormatInvalid is returned.
+func (dID DeviceID) Format() DeviceIDFormat {
+	deviceID := string(dID)
+
+	// Hex must be checked before UUID, as hex strings are also valid UUIDs.
+	data, err := hex.DecodeString(deviceID)
+	if err == nil {
+		if len(data) != 16 {
+			return DeviceIDFormatInvalid
+		}
+
+		if lowerMatch.MatchString(deviceID) {
+			return DeviceIDFormatLowerHexString
+		}
+		return DeviceIDFormatUpperHexString
+	}
+
+	_, err = uuid.Parse(deviceID)
+	if err == nil {
+		return DeviceIDFormatUUID
+	}
+
+	data, err = base64.StdEncoding.DecodeString(deviceID)
+	if err == nil && len(data) == 32 {
+		return DeviceIDFormatBase64
+	}
+
+	return DeviceIDFormatInvalid
+}
+
+// ExpectedDeviceIDFormat returns the expected DeviceIDFormat based on DeviceOS.
+// For undocumented devices, DeviceIDFormatInvalid is returned.
+func (data ClientData) ExpectedDeviceIDFormat() DeviceIDFormat {
+	switch data.DeviceOS {
+	case protocol.DeviceAndroid:
+		return DeviceIDFormatLowerHexString
+	case protocol.DeviceIOS:
+		return DeviceIDFormatUpperHexString
+	case protocol.DeviceWin32:
+		return DeviceIDFormatLowerHexString
+	case protocol.DeviceOrbis:
+		return DeviceIDFormatUUID
+	case protocol.DeviceXBOX:
+		return DeviceIDFormatBase64
+	}
+	return DeviceIDFormatInvalid
+}
+
+// Generate returns a randomly generated DeviceID in the format described by f.
+// For DeviceIDFormatInvalid or unknown formats, it falls back to
+// DeviceIDFormatLowerHexString.
+func (f DeviceIDFormat) Generate() DeviceID {
+	switch f {
+	case DeviceIDFormatUpperHexString:
+		return DeviceID(strings.ToUpper(strings.ReplaceAll(uuid.NewString(), "-", "")))
+	case DeviceIDFormatUUID:
+		return DeviceID(uuid.NewString())
+	case DeviceIDFormatBase64:
+		b := make([]byte, 32)
+		_, _ = cryptorand.Read(b)
+		return DeviceID(base64.StdEncoding.EncodeToString(b))
+	default:
+		return DeviceID(strings.ReplaceAll(uuid.NewString(), "-", ""))
+	}
 }

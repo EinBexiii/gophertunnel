@@ -69,6 +69,11 @@ type GameData struct {
 	WorldGameMode int32
 	// Hardcore is if the world is in hardcore mode. In hardcore mode, the player cannot respawn after dying.
 	Hardcore bool
+	// XBLBroadcastMode is the mode used to broadcast the joined game across Xbox Live.
+	// When set to 0, the 'Invite' button in the pause screen is grayed out and players
+	// cannot invite their friends to the Xbox Live multiplayer session they're currently in.
+	// It only applies to worlds and has no effect on external servers.
+	XBLBroadcastMode int32
 	// GameRules defines game rules currently active with their respective values. The value of these game
 	// rules may be either 'bool', 'int32' or 'float32'. Some game rules are server side only, and don't
 	// necessarily need to be sent to the client.
@@ -115,4 +120,8 @@ type GameData struct {
 	// such as gophertunnel:example or gophertunnel:custom_property, which can be used by resource packs
 	// to change skins, models, or other player behaviors at runtime.
 	PropertyData map[string]any
+
+	// Dimensions is a list of dimension definitions sent by the DimensionData packet. This can include overriding
+	// the height of vanilla dimensions or registering new dimensions.
+	Dimensions []protocol.DimensionDefinition
 }
