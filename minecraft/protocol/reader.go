@@ -26,6 +26,7 @@ type Reader struct {
 	}
 	shieldID      int32
 	limitsEnabled bool
+	buf           [8]byte
 }
 
 // NewReader creates a new Reader using the io.ByteReader passed as underlying source to read bytes from.
@@ -500,6 +501,8 @@ func (r *Reader) ItemInstanceNew(i *ItemInstance) {
 	r.ByteSlice(&extraData)
 
 	if len(extraData) == 0 {
+		x.NBTData, x.CanBePlacedOn, x.CanBreak = nil, nil, nil
+		x.BlockingTick = 0
 		return
 	}
 
@@ -509,10 +512,10 @@ func (r *Reader) ItemInstanceNew(i *ItemInstance) {
 	var length int16
 	bufReader.Int16(&length)
 
-	if length == 0 {
+	switch length {
+	case 0:
 		x.NBTData = nil
-		return
-	} else if length == -1 {
+	case -1:
 		var version uint8
 		bufReader.Uint8(&version)
 
@@ -523,7 +526,7 @@ func (r *Reader) ItemInstanceNew(i *ItemInstance) {
 			bufReader.UnknownEnumOption(version, "item user data version")
 			return
 		}
-	} else {
+	default:
 		bufReader.NBT(&x.NBTData, nbt.LittleEndian)
 	}
 
@@ -531,8 +534,9 @@ func (r *Reader) ItemInstanceNew(i *ItemInstance) {
 	FuncSliceUint32Length(bufReader, &x.CanBreak, bufReader.StringUTF)
 
 	if x.NetworkID == bufReader.shieldID {
-		var blockingTick int64
-		bufReader.Int64(&blockingTick)
+		bufReader.Int64(&x.BlockingTick)
+	} else {
+		x.BlockingTick = 0
 	}
 }
 
