@@ -43,6 +43,10 @@ type ListenConfig struct {
 	// account.
 	AuthenticationDisabled bool
 
+	// DisablePacketEncryption disables packet encryption for accepted connections.
+	// Authentication is unaffected. Only use this on trusted networks.
+	DisablePacketEncryption bool
+
 	// MaximumPlayers is the maximum amount of players accepted in the server. If non-zero, players that
 	// attempt to join while the server is full will be kicked during login. If zero, the maximum player count
 	// will be dynamically updated each time a player joins, so that an unlimited amount of players is
@@ -99,6 +103,9 @@ type ListenConfig struct {
 	// If set, it will be called before sending the ResourcePacksInfo packet. The returned resource packs
 	// will be forwarded to the client in place of the Listener's current ones.
 	FetchResourcePacks func(identityData login.IdentityData, clientData login.ClientData, current []*resource.Pack) []*resource.Pack
+	// ResourcePackDelivery controls how resource pack data is sent to clients. The zero value keeps the
+	// conservative default chunk size and pacing.
+	ResourcePackDelivery ResourcePackDeliveryConfig
 
 	// PacketFunc is called whenever a packet is read from or written to a connection returned when using
 	// Listener.Accept. It includes packets that are otherwise covered in the connection sequence, such as the
@@ -109,6 +116,14 @@ type ListenConfig struct {
 	// MaxDecompressedLen is the maximum length of a decompressed packet to prevent potential exploits. If 0,
 	// the default value is 16MB (16 * 1024 * 1024). Setting this to a negative integer disables the limit.
 	MaxDecompressedLen int
+
+	// Allow filters what connections are allowed to connect to the Server. The
+	// address, identity data, and client data of the connection are passed. If
+	// Allow returns false, the connection is closed with the string returned as
+	// the disconnect message. WARNING: Use the client data at your own risk, it
+	// cannot be trusted because it can be freely changed by the player
+	// connecting.
+	Allow func(addr net.Addr, identityData login.IdentityData, clientData login.ClientData) (string, bool)
 }
 
 // Listener implements a Minecraft listener on top of an unspecific net.Listener. It abstracts away the
@@ -403,18 +418,21 @@ func (listener *Listener) createConn(netConn net.Conn) {
 	listener.packsMu.RUnlock()
 
 	conn := newConn(netConn, listener.key, listener.cfg.ErrorLog, proto{}, listener.cfg.FlushRate, true)
+	conn.disableEncryption = conn.disableEncryption || listener.cfg.DisablePacketEncryption
 	conn.acceptedProto = append(listener.cfg.AcceptedProtocols, proto{})
 	conn.compression = listener.cfg.Compression
 	conn.compressionSelector = listener.cfg.CompressionSelector
 	conn.compressionThreshold = listener.cfg.CompressionThreshold
 	conn.maxDecompressedLen = listener.cfg.MaxDecompressedLen
 	conn.pool = conn.proto.Packets(true)
+	conn.allow = listener.cfg.Allow
 
 	conn.packetFunc = listener.cfg.PacketFunc
 	conn.texturePacksRequired = listener.cfg.TexturePacksRequired
 	conn.forceDisableVibrantVisuals = listener.cfg.ForceDisableVibrantVisuals
 	conn.resourcePacks = packs
 	conn.fetchResourcePacks = listener.cfg.FetchResourcePacks
+	conn.resourcePackDelivery = listener.cfg.ResourcePackDelivery.normalized()
 	conn.gameData.WorldName = listener.status().ServerName
 	conn.authEnabled = !listener.cfg.AuthenticationDisabled
 	conn.verifier = listener.verifier
