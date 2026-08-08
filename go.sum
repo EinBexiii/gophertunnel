@@ -1,5 +1,5 @@
-github.com/EinBexiii/go-raknet v0.0.0-20260805202054-5b9ec160f152 h1:o6Z1I0TNBn6iH//g4yLG3+4ZyyXsFoeYkdxLbffP7Bw=
-github.com/EinBexiii/go-raknet v0.0.0-20260805202054-5b9ec160f152/go.mod h1:/yysjwfCXm2+2OY8mBazLzcxJ3irnylKCyG3FLgUPVU=
+github.com/EinBexiii/go-raknet v0.0.0-20260808123403-449fedf3b0b4 h1:4yXQi6e6BCIMDWFjsog1pKyOGYsTc+0ofy5XRQT1gU8=
+github.com/EinBexiii/go-raknet v0.0.0-20260808123403-449fedf3b0b4/go.mod h1:/yysjwfCXm2+2OY8mBazLzcxJ3irnylKCyG3FLgUPVU=
 github.com/coreos/go-oidc/v3 v3.17.0 h1:hWBGaQfbi0iVviX4ibC7bk8OKT5qNr4klBaCHVNvehc=
 github.com/coreos/go-oidc/v3 v3.17.0/go.mod h1:wqPbKFrVnE90vty060SB40FCJ8fTHTxSwyXJqZH+sI8=
 github.com/davecgh/go-spew v1.1.1 h1:vj9j/u1bqnvCEfJOwUhtlOARqs3+rkHYY13jYWTU97c=
