@@ -1021,14 +1021,21 @@ func (conn *Conn) handleResourcePacksInfo(pk *packet.ResourcePacksInfo) error {
 	}
 
 	if len(packsToDownload) != 0 {
-		conn.expect(packet.IDResourcePackDataInfo, packet.IDResourcePackChunkData)
+		// Proxies exist that announce the packs of the server they transfer to and then spawn the player
+		// straight away, without ever sending the data of those packs. Keep accepting the packets that
+		// complete the spawn sequence, so that the connection is not stuck waiting for pack data that never
+		// arrives.
+		conn.expect(packet.IDResourcePackDataInfo, packet.IDResourcePackChunkData, packet.IDChunkRadiusUpdated, packet.IDPlayStatus)
 		_ = conn.WritePacket(&packet.ResourcePackClientResponse{
 			Response:        packet.PackResponseSendPacks,
 			PacksToDownload: packsToDownload,
 		})
-		return nil
+		// Process any deferred packets that might have arrived out of order.
+		return conn.processDeferredPackets()
 	}
-	conn.expect(packet.IDResourcePackStack)
+	// A proxy that spawns the player straight away may not send a stack either, so the packets completing
+	// the spawn sequence are accepted here too.
+	conn.expect(packet.IDResourcePackStack, packet.IDChunkRadiusUpdated, packet.IDPlayStatus)
 
 	_ = conn.WritePacket(&packet.ResourcePackClientResponse{Response: packet.PackResponseAllPacksDownloaded})
 	// Process any deferred packets that might have arrived out of order.
