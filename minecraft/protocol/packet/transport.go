@@ -25,6 +25,20 @@ type PacketReader interface {
 	ReadPacket() ([]byte, error)
 }
 
+// UnreliableWriter may be implemented by transports that can deliver a
+// packet batch without guaranteed or ordered delivery.
+//
+// Minecraft packet encryption cannot be shared between two Encoders: each keeps its own CTR stream, and the
+// peer's Decoder tracks a single counter for the connection. Conn therefore only builds an unreliable sink
+// for a transport that also implements EncryptionDisabler and disables Minecraft's own encryption, i.e. one
+// that provides its own encryption instead.
+type UnreliableWriter interface {
+	// WriteUnreliable writes one complete packet batch with relaxed
+	// delivery guarantees. Implementations fall back to reliable
+	// delivery when the batch cannot be sent unreliably.
+	WriteUnreliable(b []byte) (n int, err error)
+}
+
 // TransportCapabilities is the full set of optional packet transport methods.
 //
 // Normal transports do not need to implement this interface. If code wraps a
@@ -34,4 +48,5 @@ type TransportCapabilities interface {
 	BatchHeaderer
 	EncryptionDisabler
 	PacketReader
+	UnreliableWriter
 }

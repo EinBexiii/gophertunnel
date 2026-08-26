@@ -133,6 +133,20 @@ type Dialer struct {
 	// (pre-1.21.90) when connecting to the server. This should only be used for outdated
 	// servers, as enabling it will cause compatibility issues with updated servers.
 	EnableLegacyAuth bool
+
+	// UnreliablePackets reports whether the packet with the ID passed should be sent without guaranteed or
+	// ordered delivery. It has no effect unless the underlying transport implements packet.UnreliableWriter
+	// and disables Minecraft's own encryption (see that interface's doc comment); transports that don't,
+	// such as RakNet, always send every packet reliably. If nil, all packets are sent reliably.
+	//
+	// Only packet IDs whose latest value makes earlier ones obsolete belong here: unreliable packets may
+	// arrive out of order, or not at all, relative to the reliable stream and to each other. A packet that
+	// converts into several packets with different IDs may have those packets split across both batches,
+	// with no order between them.
+	//
+	// UnreliablePackets runs while Conn holds its send buffer lock, so it must be cheap and must not call
+	// back into the Conn it is set on.
+	UnreliablePackets func(id uint32) bool
 }
 
 // Dial dials a Minecraft connection to the address passed over the network passed. The network is typically
@@ -299,6 +313,10 @@ func (d Dialer) DialContextNetwork(ctx context.Context, network Network, address
 	conn.disconnectOnInvalidPacket = d.DisconnectOnInvalidPackets
 	conn.disconnectOnUnknownPacket = d.DisconnectOnUnknownPackets
 	conn.maxDecompressedLen = math.MaxInt
+	conn.unreliablePackets = d.UnreliablePackets
+	if conn.unreliablePackets != nil && conn.unreliableEnc == nil {
+		conn.log.Debug("UnreliablePackets is set but the transport doesn't implement packet.UnreliableWriter with encryption disabled; every packet will be sent reliably")
+	}
 
 	defaultIdentityData(&conn.identityData)
 	defaultClientData(address, conn.identityData.DisplayName, &conn.clientData)

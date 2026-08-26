@@ -49,6 +49,43 @@ func NewEncoder(w io.Writer) *Encoder {
 	}
 }
 
+// NewUnreliableEncoder returns a new Encoder that writes packet batches to w through its WriteUnreliable
+// method instead of Write. The Encoder mirrors any BatchHeaderer and EncryptionDisabler capability w also
+// implements, so it behaves exactly as an Encoder built with NewEncoder(w) would, had w implemented
+// io.Writer directly.
+func NewUnreliableEncoder(w UnreliableWriter) *Encoder {
+	return NewEncoder(unreliableSink{w})
+}
+
+// unreliableSink adapts an UnreliableWriter's WriteUnreliable method to the io.Writer interface expected
+// by NewEncoder, forwarding BatchHeaderer and EncryptionDisabler to whatever w implements underneath.
+type unreliableSink struct {
+	UnreliableWriter
+}
+
+// Write implements io.Writer by writing b through the wrapped WriteUnreliable method.
+func (s unreliableSink) Write(b []byte) (n int, err error) {
+	return s.WriteUnreliable(b)
+}
+
+// BatchHeader implements BatchHeaderer, forwarding to the wrapped UnreliableWriter if it also implements
+// BatchHeaderer, and otherwise falling back to the same default NewEncoder would use.
+func (s unreliableSink) BatchHeader() []byte {
+	if h, ok := s.UnreliableWriter.(BatchHeaderer); ok {
+		return h.BatchHeader()
+	}
+	return []byte{header}
+}
+
+// DisableEncryption implements EncryptionDisabler, forwarding to the wrapped UnreliableWriter if it also
+// implements EncryptionDisabler, and otherwise defaulting to encryption being allowed.
+func (s unreliableSink) DisableEncryption() bool {
+	if d, ok := s.UnreliableWriter.(EncryptionDisabler); ok {
+		return d.DisableEncryption()
+	}
+	return false
+}
+
 // EnableEncryption enables encryption for the Encoder using the secret key bytes passed. Each packet sent
 // after encryption is enabled will be encrypted.
 func (encoder *Encoder) EnableEncryption(keyBytes [32]byte) {

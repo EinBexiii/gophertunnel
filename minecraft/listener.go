@@ -124,6 +124,20 @@ type ListenConfig struct {
 	// cannot be trusted because it can be freely changed by the player
 	// connecting.
 	Allow func(addr net.Addr, identityData login.IdentityData, clientData login.ClientData) (string, bool)
+
+	// UnreliablePackets reports whether the packet with the ID passed should be sent without guaranteed or
+	// ordered delivery. It has no effect unless the underlying transport implements packet.UnreliableWriter
+	// and disables Minecraft's own encryption (see that interface's doc comment); transports that don't,
+	// such as RakNet, always send every packet reliably. If nil, all packets are sent reliably.
+	//
+	// Only packet IDs whose latest value makes earlier ones obsolete belong here: unreliable packets may
+	// arrive out of order, or not at all, relative to the reliable stream and to each other. A packet that
+	// converts into several packets with different IDs may have those packets split across both batches,
+	// with no order between them.
+	//
+	// UnreliablePackets runs while Conn holds its send buffer lock, so it must be cheap and must not call
+	// back into the Conn it is set on.
+	UnreliablePackets func(id uint32) bool
 }
 
 // Listener implements a Minecraft listener on top of an unspecific net.Listener. It abstracts away the
@@ -438,6 +452,10 @@ func (listener *Listener) createConn(netConn net.Conn) {
 	conn.verifier = listener.verifier
 	conn.disconnectOnUnknownPacket = !listener.cfg.AllowUnknownPackets
 	conn.disconnectOnInvalidPacket = !listener.cfg.AllowInvalidPackets
+	conn.unreliablePackets = listener.cfg.UnreliablePackets
+	if conn.unreliablePackets != nil && conn.unreliableEnc == nil {
+		conn.log.Debug("UnreliablePackets is set but the transport doesn't implement packet.UnreliableWriter with encryption disabled; every packet will be sent reliably")
+	}
 
 	if listener.playerCount.Load() == int32(listener.cfg.MaximumPlayers) && listener.cfg.MaximumPlayers != 0 {
 		// The server was full. We kick the player immediately and close the connection.

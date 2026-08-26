@@ -88,10 +88,14 @@ type Conn struct {
 	log         *slog.Logger
 	authEnabled bool
 
-	proto                Protocol
-	acceptedProto        []Protocol
-	pool                 packet.Pool
-	enc                  *packet.Encoder
+	proto         Protocol
+	acceptedProto []Protocol
+	pool          packet.Pool
+	enc           *packet.Encoder
+	// unreliableEnc encodes packet batches for transports that implement packet.UnreliableWriter and also
+	// disable Minecraft's own encryption (see that interface's doc comment for why). It is nil otherwise, in
+	// which case unreliablePackets is never consulted and every packet takes the reliable path.
+	unreliableEnc        *packet.Encoder
 	dec                  *packet.Decoder
 	compression          packet.Compression
 	compressionSelector  func(proto Protocol) packet.Compression
@@ -140,6 +144,14 @@ type Conn struct {
 	// they are sent each 20th of a second.
 	bufferedSend      [][]byte
 	bufferedSendSpare [][]byte
+	// bufferedSendUnreliable holds packets written that unreliablePackets selected for the unreliable
+	// sink. It is flushed through unreliableEnc as its own batch, after the reliable batch.
+	bufferedSendUnreliable      [][]byte
+	bufferedSendUnreliableSpare [][]byte
+	// unreliablePackets reports whether the packet ID passed should be sent over the unreliable sink rather
+	// than the reliable one. It is only consulted when unreliableEnc is non-nil. A nil unreliablePackets
+	// (the default) keeps every packet on the reliable path.
+	unreliablePackets func(id uint32) bool
 	hdr               *packet.Header
 
 	// readyToLogin is a bool indicating if the connection is ready to login. This is used to ensure that the client
@@ -223,6 +235,9 @@ func newConn(netConn net.Conn, key *ecdsa.PrivateKey, log *slog.Logger, proto Pr
 	}
 	if d, ok := netConn.(packet.EncryptionDisabler); ok {
 		conn.disableEncryption = d.DisableEncryption()
+	}
+	if uw, ok := netConn.(packet.UnreliableWriter); ok && conn.disableEncryption {
+		conn.unreliableEnc = packet.NewUnreliableEncoder(uw)
 	}
 
 	if c, ok := netConn.(interface{ Context() context.Context }); ok {
@@ -407,7 +422,12 @@ func (conn *Conn) WritePacket(pk packet.Packet) error {
 		if conn.packetFunc != nil {
 			conn.packetFunc(*conn.hdr, buf.Bytes()[l:], conn.LocalAddr(), conn.RemoteAddr())
 		}
-		conn.bufferedSend = append(conn.bufferedSend, append([]byte(nil), buf.Bytes()...))
+		data := append([]byte(nil), buf.Bytes()...)
+		if conn.unreliableEnc != nil && conn.unreliablePackets != nil && conn.unreliablePackets(converted.ID()) {
+			conn.bufferedSendUnreliable = append(conn.bufferedSendUnreliable, data)
+		} else {
+			conn.bufferedSend = append(conn.bufferedSend, data)
+		}
 	}
 	return nil
 }
@@ -465,12 +485,37 @@ func (conn *Conn) ResourcePacks() []*resource.Pack {
 	return conn.resourcePacks
 }
 
+// peekPacketID reads the packet ID out of the varuint32 header at the start of b, without allocating and
+// without consuming b, mirroring the decoding protocol.Varuint32/packet.Header.Read do and masking the
+// result to the 10 low bits the header format uses for the packet ID. ok is false if b is too short or the
+// varuint32 doesn't terminate within it, matching a malformed or incomplete header.
+func peekPacketID(b []byte) (id uint32, ok bool) {
+	var v uint32
+	for i := 0; i < 5 && i < len(b); i++ {
+		v |= uint32(b[i]&0x7f) << (7 * i)
+		if b[i]&0x80 == 0 {
+			return v & 0x3FF, true
+		}
+	}
+	return 0, false
+}
+
 // Write writes a slice of serialised packet data to the Conn. The data is buffered until the next 20th of a
 // tick, after which it is flushed to the connection. Write returns the amount of bytes written n.
+//
+// If the Conn has an unreliable sink and UnreliablePackets configured, Write peeks the packet ID from b's
+// header and routes b to the unreliable buffer when the policy selects it, the same way WritePacket does. A
+// header Write can't make sense of falls back to the reliable buffer, same as if no policy were set.
 func (conn *Conn) Write(b []byte) (n int, err error) {
 	conn.sendMu.Lock()
 	defer conn.sendMu.Unlock()
 
+	if conn.unreliableEnc != nil && conn.unreliablePackets != nil {
+		if id, ok := peekPacketID(b); ok && conn.unreliablePackets(id) {
+			conn.bufferedSendUnreliable = append(conn.bufferedSendUnreliable, b)
+			return len(b), nil
+		}
+	}
 	conn.bufferedSend = append(conn.bufferedSend, b)
 	return len(b), nil
 }
@@ -527,31 +572,49 @@ func (conn *Conn) Flush() error {
 	defer conn.encMu.Unlock()
 
 	conn.sendMu.Lock()
-	if len(conn.bufferedSend) == 0 {
+	if len(conn.bufferedSend) == 0 && len(conn.bufferedSendUnreliable) == 0 {
 		conn.sendMu.Unlock()
 		return nil
 	}
 
-	// Detach the current buffer and swap in the spare so writers can keep appending while we encode,
-	// without reallocating bufferedSend.
+	// Detach the current buffers and swap in their spares so writers can keep appending while we encode,
+	// without reallocating bufferedSend/bufferedSendUnreliable.
 	toSend := conn.bufferedSend
 	conn.bufferedSend = conn.bufferedSendSpare[:0]
 	conn.bufferedSendSpare = nil
+
+	toSendUnreliable := conn.bufferedSendUnreliable
+	conn.bufferedSendUnreliable = conn.bufferedSendUnreliableSpare[:0]
+	conn.bufferedSendUnreliableSpare = nil
 	conn.sendMu.Unlock()
 
-	if err := conn.enc.Encode(toSend); err != nil && !errors.Is(err, net.ErrClosed) {
-		// Should never happen.
-		panic(fmt.Errorf("error encoding packet batch: %w", err))
+	if len(toSend) > 0 {
+		if err := conn.enc.Encode(toSend); err != nil && !errors.Is(err, net.ErrClosed) {
+			// Should never happen.
+			panic(fmt.Errorf("error encoding packet batch: %w", err))
+		}
+	}
+	if len(toSendUnreliable) > 0 {
+		// The unreliable batch is encoded and sent after the reliable one, but the transport may deliver it
+		// first, or not at all: WritePacket only ever routes packets here whose latest value supersedes
+		// earlier ones, so no ordering is owed between the two batches. Unlike the reliable path above, a
+		// failed encode or write here only costs this one batch, which is the sink's own delivery contract,
+		// so it's dropped rather than treated as a reason to take the connection down.
+		_ = conn.unreliableEnc.Encode(toSendUnreliable)
 	}
 
-	// Clear out toSend so that re-using the slice after resetting its length to 0 doesn't keep references
-	// to packet payloads alive, causing an 'invisible' memory leak.
+	// Clear out toSend/toSendUnreliable so that re-using the slices after resetting their length to 0
+	// doesn't keep references to packet payloads alive, causing an 'invisible' memory leak.
 	for i := range toSend {
 		toSend[i] = nil
+	}
+	for i := range toSendUnreliable {
+		toSendUnreliable[i] = nil
 	}
 
 	conn.sendMu.Lock()
 	conn.bufferedSendSpare = toSend[:0]
+	conn.bufferedSendUnreliableSpare = toSendUnreliable[:0]
 	conn.sendMu.Unlock()
 	return nil
 }
@@ -807,6 +870,9 @@ func (conn *Conn) handleRequestNetworkSettings(pk *packet.RequestNetworkSettings
 	_ = conn.Flush()
 	conn.encMu.Lock()
 	conn.enc.EnableCompression(conn.compression, conn.compressionThreshold)
+	if conn.unreliableEnc != nil {
+		conn.unreliableEnc.EnableCompression(conn.compression, conn.compressionThreshold)
+	}
 	conn.encMu.Unlock()
 	conn.dec.EnableCompression(conn.compression, conn.maxDecompressedLen)
 	return nil
@@ -820,6 +886,9 @@ func (conn *Conn) handleNetworkSettings(pk *packet.NetworkSettings) error {
 	}
 	conn.encMu.Lock()
 	conn.enc.EnableCompression(alg, int(pk.CompressionThreshold))
+	if conn.unreliableEnc != nil {
+		conn.unreliableEnc.EnableCompression(alg, int(pk.CompressionThreshold))
+	}
 	conn.encMu.Unlock()
 	conn.dec.EnableCompression(alg, conn.maxDecompressedLen)
 	conn.readyToLogin = true
