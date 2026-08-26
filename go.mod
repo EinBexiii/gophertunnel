@@ -44,3 +44,5 @@ require (
 	golang.org/x/sys v0.41.0 // indirect
 	golang.org/x/time v0.14.0 // indirect
 )
+
+replace github.com/df-mc/go-nethernet => github.com/EinBexiii/go-nethernet v1.0.20-0.20260826163714-184f7d00c040

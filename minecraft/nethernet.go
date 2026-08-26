@@ -29,15 +29,7 @@ type NetherNet struct {
 // Ensure the connection returned by NetherNet.DialContext has the optional
 // packet methods used by Encoder and Decoder, even though DialContext returns it
 // as a net.Conn.
-//
-// TODO: restore this to the full packet.TransportCapabilities assertion (adding UnreliableWriter back to
-// the list below) once the github.com/df-mc/go-nethernet dependency this module uses provides
-// WriteUnreliable.
-var _ interface {
-	packet.BatchHeaderer
-	packet.EncryptionDisabler
-	packet.PacketReader
-} = (*nethernet.Conn)(nil)
+var _ packet.TransportCapabilities = (*nethernet.Conn)(nil)
 
 // DialContext ...
 func (n NetherNet) DialContext(ctx context.Context, address string) (net.Conn, error) {
