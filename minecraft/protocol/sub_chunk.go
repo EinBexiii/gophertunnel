@@ -46,13 +46,43 @@ func (x *SubChunkEntry) Marshal(r IO) {
 	OptionalFunc(r, &x.RawPayload, r.ByteSlice)
 	r.Uint8(&x.HeightMapType)
 	OptionalFunc(r, &x.HeightMapData, func(data *[]int8) {
-		FuncSliceOfLen(r, 256, data, r.Int8)
+		subChunkHeightMap(r, data)
 	})
 	r.Uint8(&x.RenderHeightMapType)
 	OptionalFunc(r, &x.RenderHeightMapData, func(data *[]int8) {
-		FuncSliceOfLen(r, 256, data, r.Int8)
+		subChunkHeightMap(r, data)
 	})
 	OptionalFunc(r, &x.BlobHash, r.Uint64)
+}
+
+// subChunkHeightMapRows and subChunkHeightMapCols are the shape of a sub-chunk
+// heightmap: one signed height per column of a 16 by 16 sub chunk.
+const (
+	subChunkHeightMapRows = 16
+	subChunkHeightMapCols = 16
+)
+
+// subChunkHeightMap reads/writes a sub-chunk heightmap. It holds 256 heights,
+// but is not a flat array on the wire: each of the 16 rows carries its own
+// length, which is what Mojang's documentation means by array<array<int8>>.
+// That is 16 lengths plus 256 values, so 272 bytes, and mistaking the byte
+// count for an element count produces a flat 272-value array that decodes
+// into the following fields and makes the client drop the connection.
+func subChunkHeightMap(r IO, data *[]int8) {
+	if len(*data) != subChunkHeightMapRows*subChunkHeightMapCols {
+		*data = make([]int8, subChunkHeightMapRows*subChunkHeightMapCols)
+	}
+	for row := range subChunkHeightMapRows {
+		n := uint32(subChunkHeightMapCols)
+		r.Varuint32(&n)
+		if n != subChunkHeightMapCols {
+			r.InvalidValue(n, "sub-chunk heightmap row", "must hold exactly 16 heights")
+			return
+		}
+		for col := range subChunkHeightMapCols {
+			r.Int8(&(*data)[row*subChunkHeightMapCols+col])
+		}
+	}
 }
 
 // SubChunkOffset represents an offset from the base position of another sub chunk.
