@@ -13,7 +13,6 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"math"
 	"math/rand"
 	"net"
 	"net/http"
@@ -111,6 +110,11 @@ type Dialer struct {
 	// are converted from and to this Protocol.
 	Protocol Protocol
 
+	// MaxDecompressedLen is the maximum length of a decompressed packet batch to prevent potential exploits.
+	// If 0, the default value is 16MB (16 * 1024 * 1024). Setting this to a negative integer disables the
+	// limit.
+	MaxDecompressedLen int
+
 	// FlushRate is the rate at which packets sent are flushed. Packets are buffered for a duration up to
 	// FlushRate and are compressed/encrypted together to improve compression ratios. The lower this
 	// time.Duration, the lower the latency but the less efficient both network and cpu wise.
@@ -135,13 +139,8 @@ type Dialer struct {
 	// servers, as enabling it will cause compatibility issues with updated servers.
 	EnableLegacyAuth bool
 
-	// IgnorePongPort, if set to true, makes Dial connect to the address as
-	// supplied by the caller, ignoring any redirect port advertised in the
-	// server's Pong (MOTD fragments 10/11). The vanilla Bedrock client does
-	// not follow this redirect either, so enabling this is required for
-	// servers whose Pong advertises a port that is not actually reachable
-	// (a common misconfiguration on Geyser/CF Spectrum setups).
-	IgnorePongPort bool
+	// DisablePortFollowing, if set to true, dials respect provided port instead of following the pong port.
+	DisablePortFollowing bool
 }
 
 // Dial dials a Minecraft connection to the address passed over the network passed. The network is typically
@@ -282,13 +281,8 @@ func (d Dialer) DialContextNetwork(ctx context.Context, network Network, address
 		d.IdentityData = identityData
 	}
 
-	var pong []byte
-	if !d.IgnorePongPort {
-		// Skip the Pong port redirect entirely when IgnorePongPort is set. The
-		// vanilla Bedrock client connects directly to the address typed by the
-		// user; following the redirect advertised in the Pong can confuse
-		// anti-DDoS proxies like Cloudflare Spectrum.
-		if pong, err = network.PingContext(ctx, address); err == nil {
+	if !d.DisablePortFollowing {
+		if pong, err := network.PingContext(ctx, address); err == nil {
 			address = addressWithPongPort(pong, address)
 		}
 	}
@@ -313,7 +307,7 @@ func (d Dialer) DialContextNetwork(ctx context.Context, network Network, address
 	conn.cacheEnabled = d.EnableClientCache
 	conn.disconnectOnInvalidPacket = d.DisconnectOnInvalidPackets
 	conn.disconnectOnUnknownPacket = d.DisconnectOnUnknownPackets
-	conn.maxDecompressedLen = math.MaxInt
+	conn.maxDecompressedLen = d.MaxDecompressedLen
 
 	defaultIdentityData(&conn.identityData)
 	defaultClientData(address, conn.identityData.DisplayName, &conn.clientData)
@@ -356,7 +350,9 @@ func (d Dialer) DialContextNetwork(ctx context.Context, network Network, address
 		return nil, conn.closeErr("dial")
 	case <-readyForLogin:
 		// We've received our network settings, so we can now send our login request.
-		conn.expect(packet.IDServerToClientHandshake, packet.IDPlayStatus)
+		// ResourcePacksInfo is expected too: servers without encryption skip the handshake and some send it
+		// before PlayStatus(LoginSuccess).
+		conn.expect(packet.IDServerToClientHandshake, packet.IDPlayStatus, packet.IDResourcePacksInfo)
 		if err := conn.WritePacket(&packet.Login{ConnectionRequest: request, ClientProtocol: d.Protocol.ID()}); err != nil {
 			return nil, conn.wrap(fmt.Errorf("send login: %w", err), "dial")
 		}
@@ -423,26 +419,12 @@ func listenConn(conn *Conn, readyForLogin, connected chan struct{}, cancel conte
 	for {
 		// We finally arrived at the packet decoding loop. We constantly decode packets that arrive
 		// and push them to the Conn so that they may be processed.
-		packets, err := conn.dec.Decode()
-		if err != nil {
-			if !errors.Is(err, net.ErrClosed) {
-				if cancelContext {
-					cancel(err)
-				} else {
-					conn.log.Error(err.Error())
-				}
-			}
-			return
-		}
-		for _, data := range packets {
+		receiveErr := false
+		if err := conn.dec.DecodeFunc(func(data []byte) error {
 			loggedInBefore, readyToLoginBefore := conn.loggedIn, conn.readyToLogin
 			if err := conn.receive(data); err != nil {
-				if cancelContext {
-					cancel(err)
-				} else {
-					conn.log.Error(err.Error())
-				}
-				return
+				receiveErr = true
+				return err
 			}
 			if !readyToLoginBefore && conn.readyToLogin {
 				// This is the signal that the connection is ready to login, so we put a value in the channel so that
@@ -455,6 +437,16 @@ func listenConn(conn *Conn, readyForLogin, connected chan struct{}, cancel conte
 				cancelContext = false
 				connected <- struct{}{}
 			}
+			return nil
+		}); err != nil {
+			if receiveErr || !errors.Is(err, net.ErrClosed) {
+				if cancelContext {
+					cancel(err)
+				} else {
+					conn.log.Error(err.Error())
+				}
+			}
+			return
 		}
 	}
 }
